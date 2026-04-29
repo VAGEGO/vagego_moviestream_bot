@@ -336,7 +336,7 @@ async def main():
     app.router.add_get    ("/",                    handle_index)
     app.router.add_get    ("/health",              handle_health)
     app.router.add_get    ("/stream/{message_id}", handle_stream)
-    app.router.add_head   ("/stream/{message_id}", handle_stream)
+    app.router.add_get    ("/stream/{message_id}", handle_stream)
     app.router.add_options("/stream/{message_id}", handle_options)
     app.router.add_get    ("/cache",               handle_cache)
 
