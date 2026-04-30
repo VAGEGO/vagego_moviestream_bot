@@ -1,24 +1,20 @@
 import os, asyncio, logging, sys, time, json
 from pathlib import Path
 from aiohttp import web
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout,
     format="%(asctime)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("VageGo")
 
-API_ID       = os.environ.get("API_ID", "")
-API_HASH     = os.environ.get("API_HASH", "")
-BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
-OWNER_ID     = int(os.environ.get("OWNER_ID", "0"))
-BASE_URL     = os.environ.get("BASE_URL", "").rstrip("/")
-PORT         = int(os.environ.get("PORT", "8080"))
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+OWNER_ID  = int(os.environ.get("OWNER_ID", "0"))
+BASE_URL  = os.environ.get("BASE_URL", "").rstrip("/")
+PORT      = int(os.environ.get("PORT", "8080"))
 
-missing = [k for k,v in {"API_ID":API_ID,"API_HASH":API_HASH,"BOT_TOKEN":BOT_TOKEN}.items() if not v]
-if missing:
-    log.error(f"MISSING ENV VARS: {', '.join(missing)}")
+if not BOT_TOKEN:
+    log.error("BOT_TOKEN missing!")
     sys.exit(1)
 
 STORE_PATH = Path("/tmp/file_store.json")
@@ -38,15 +34,10 @@ def save_store(store):
         log.warning(f"Store save error: {e}")
 
 FILE_STORE = load_store()
+log.info(f"Loaded {len(FILE_STORE)} cached files")
 
-# ── KEY FIX: workdir session instead of in_memory ──
-bot = Client(
-    name="vagego_bot",
-    api_id=int(API_ID),
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    workdir="/tmp",          # session file /tmp/vagego_bot.session
-)
+def make_url(key):
+    return f"{BASE_URL or f'http://localhost:{PORT}'}/stream/{key}"
 
 def fmt_size(n):
     for u in ["B","KB","MB","GB"]:
@@ -54,81 +45,89 @@ def fmt_size(n):
         n /= 1024
     return f"{n:.1f} TB"
 
-def make_url(key):
-    return f"{BASE_URL or f'http://localhost:{PORT}'}/stream/{key}"
-
-def is_owner(msg):
+def is_owner(user_id):
     if not OWNER_ID: return True
-    return msg.from_user and msg.from_user.id == OWNER_ID
+    return user_id == OWNER_ID
 
 # ══ COMMANDS ══════════════════════════════════════
 
-@bot.on_message(filters.command("start") & filters.private)
-async def cmd_start(_, msg: Message):
-    name = msg.from_user.first_name if msg.from_user else "User"
-    await msg.reply_text(
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    name = update.effective_user.first_name or "User"
+    await update.message.reply_text(
         f"👋 **Hello {name}!**\n\n"
         "🎬 **VageGo Stream Bot**\n\n"
         "✅ যেকোনো **video forward** করুন\n"
         "🔗 সাথে সাথে **Stream Link** পাবেন!\n\n"
         f"📁 Cached: `{len(FILE_STORE)}` files",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🎬 VageGo App", url="https://vagego.netlify.app")
         ]])
     )
 
-@bot.on_message(filters.command("ping") & filters.private)
-async def cmd_ping(_, msg: Message):
+async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = time.monotonic()
-    m = await msg.reply_text("🏓 Pinging...")
+    m = await update.message.reply_text("🏓 Pinging...")
     ms = round((time.monotonic() - t) * 1000)
-    await m.edit_text(f"🏓 **Pong!** `{ms}ms`\n✅ Bot Online\n📁 Cached: `{len(FILE_STORE)}`")
+    await m.edit_text(f"🏓 **Pong!** `{ms}ms`\n✅ Bot Online\n📁 Cached: `{len(FILE_STORE)}`", parse_mode="Markdown")
 
-@bot.on_message(filters.command("myid") & filters.private)
-async def cmd_myid(_, msg: Message):
-    await msg.reply_text(f"🆔 Your ID: `{msg.from_user.id}`")
+async def cmd_myid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"🆔 Your ID: `{update.effective_user.id}`", parse_mode="Markdown"
+    )
 
-@bot.on_message(filters.command("list") & filters.private)
-async def cmd_list(_, msg: Message):
-    if not is_owner(msg): return
+async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id): return
     if not FILE_STORE:
-        await msg.reply_text("📭 কোনো cached file নেই।")
+        await update.message.reply_text("📭 কোনো cached file নেই।")
         return
     lines = [f"📁 **Cached ({len(FILE_STORE)}):**\n"]
     for i, (k, v) in enumerate(list(FILE_STORE.items())[-10:], 1):
         lines.append(f"{i}. `{v['file_name']}`\n`{make_url(k)}`")
-    await msg.reply_text("\n".join(lines))
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 # ══ MAIN FEATURE ══════════════════════════════════
 
-@bot.on_message(filters.private)
-async def on_media(_, msg: Message):
-    if not (msg.video or msg.document or msg.audio or msg.animation):
-        return
-    if not is_owner(msg):
-        await msg.reply_text(f"🔒 শুধু owner ব্যবহার করতে পারবে।\nআপনার ID: `{msg.from_user.id}`")
+async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    log.info(f"Media received from user: {user_id}")
+
+    if not is_owner(user_id):
+        await update.message.reply_text(
+            f"🔒 শুধু owner ব্যবহার করতে পারবে।\nআপনার ID: `{user_id}`",
+            parse_mode="Markdown"
+        )
         return
 
-    proc = await msg.reply_text("⏳ Stream link তৈরি হচ্ছে...")
+    proc = await update.message.reply_text("⏳ Stream link তৈরি হচ্ছে...")
 
     try:
-        media     = msg.video or msg.document or msg.audio or msg.animation
+        msg = update.message
+        media = msg.video or msg.document or msg.audio or msg.animation
+
+        if not media:
+            await proc.edit_text("❌ কোনো media পাওয়া যায়নি।")
+            return
+
         file_id   = media.file_id
-        file_name = getattr(media, "file_name", None) or f"video_{msg.id}.mp4"
+        file_name = getattr(media, "file_name", None) or f"video_{msg.message_id}.mp4"
         file_size = getattr(media, "file_size", 0) or 0
         mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
 
         if not mime_type.startswith(("video/", "audio/")):
             mime_type = "video/mp4"
 
-        key = str(msg.id)
+        key = str(msg.message_id)
         FILE_STORE[key] = {
-            "file_id": file_id, "file_name": file_name,
-            "mime_type": mime_type, "file_size": file_size,
+            "file_id": file_id,
+            "file_name": file_name,
+            "mime_type": mime_type,
+            "file_size": file_size,
         }
         save_store(FILE_STORE)
-
         url = make_url(key)
+
+        log.info(f"Stream link ready: {url} | {file_name}")
 
         await proc.edit_text(
             f"✅ **Stream Link Ready!**\n\n"
@@ -136,18 +135,15 @@ async def on_media(_, msg: Message):
             f"📦 **Size:** {fmt_size(file_size)}\n\n"
             f"🔗 **Stream URL:**\n`{url}`\n\n"
             f"➡️ এই URL VageGo Admin Panel এ paste করুন",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("▶ Test করুন", url=url)
             ]])
         )
-        log.info(f"Link ready: {url} | {file_name}")
 
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
-        await proc.edit_text(f"⚠️ Rate limit। {e.value}s পর চেষ্টা করুন।")
     except Exception as e:
         log.error(f"on_media error: {e}", exc_info=True)
-        await proc.edit_text(f"❌ Error: `{str(e)[:300]}`")
+        await proc.edit_text(f"❌ Error: `{str(e)[:300]}`", parse_mode="Markdown")
 
 # ══ WEB SERVER ════════════════════════════════════
 
@@ -174,51 +170,50 @@ async def handle_stream(req):
     if key not in FILE_STORE:
         FILE_STORE.update(load_store())
     if key not in FILE_STORE:
-        return web.Response(text=f"File '{key}' not found. Video আবার পাঠান।", status=404)
+        return web.Response(text=f"File '{key}' not found.", status=404)
 
     info = FILE_STORE[key]
-    file_id, file_name = info["file_id"], info["file_name"]
-    mime_type, file_size = info["mime_type"], info["file_size"]
+    file_id   = info["file_id"]
+    file_name = info["file_name"]
+    mime_type = info["mime_type"]
+    file_size = info["file_size"]
 
-    rh = req.headers.get("Range","")
-    start, end = 0, max(file_size-1, 0)
-    if rh and "=" in rh:
-        try:
-            p = rh.split("=",1)[1].split("-",1)
-            start = int(p[0].strip()) if p[0].strip() else 0
-            end   = int(p[1].strip()) if len(p)>1 and p[1].strip() else max(file_size-1,0)
-        except: pass
-
-    cl = max(end - start + 1, 0)
-    headers = {
-        "Content-Type": mime_type,
-        "Accept-Ranges": "bytes",
-        "Content-Disposition": f'inline; filename="{file_name}"',
-        "Access-Control-Allow-Origin": "*",
-    }
-    if file_size > 0:
-        headers["Content-Range"]  = f"bytes {start}-{end}/{file_size}"
-        headers["Content-Length"] = str(cl)
-
-    resp = web.StreamResponse(status=206 if rh else 200, headers=headers)
+    # Download from Telegram and stream
+    bot = req.app["bot"]
     try:
-        await resp.prepare(req)
-    except: return resp
+        tg_file = await bot.get_file(file_id)
+        file_url = tg_file.file_path
 
-    try:
-        sent = 0
-        async for chunk in bot.stream_media(file_id, offset=start, limit=cl if cl>0 else None):
-            if not chunk: continue
-            try: await resp.write(chunk)
-            except: break
-            sent += len(chunk)
-            if cl and sent >= cl: break
+        import aiohttp as aio
+        rh = req.headers.get("Range","")
+        headers = {
+            "Content-Type": mime_type,
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": f'inline; filename="{file_name}"',
+            "Access-Control-Allow-Origin": "*",
+        }
+
+        async with aio.ClientSession() as session:
+            req_headers = {}
+            if rh: req_headers["Range"] = rh
+
+            async with session.get(file_url, headers=req_headers) as r:
+                if file_size > 0 and rh:
+                    cr = r.headers.get("Content-Range","")
+                    cl = r.headers.get("Content-Length","")
+                    if cr: headers["Content-Range"] = cr
+                    if cl: headers["Content-Length"] = cl
+
+                resp = web.StreamResponse(status=r.status, headers=headers)
+                await resp.prepare(req)
+                async for chunk in r.content.iter_chunked(65536):
+                    await resp.write(chunk)
+                await resp.write_eof()
+                return resp
+
     except Exception as e:
         log.error(f"Stream error: {e}")
-
-    try: await resp.write_eof()
-    except: pass
-    return resp
+        return web.Response(text=f"Stream error: {e}", status=500)
 
 async def handle_options(req):
     return web.Response(status=200, headers={
@@ -231,39 +226,58 @@ async def handle_options(req):
 
 async def main():
     log.info("="*48)
-    log.info("  VageGo Telegram Stream Bot")
+    log.info("  VageGo Telegram Stream Bot v3")
     log.info("="*48)
 
-    app = web.Application()
-    app.router.add_get    ("/",                    handle_index)
-    app.router.add_get    ("/health",              handle_health)
-    app.router.add_get    ("/stream/{message_id}", handle_stream)
-    app.router.add_options("/stream/{message_id}", handle_options)
+    # Build telegram app
+    tg_app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
 
-    runner = web.AppRunner(app)
+    tg_app.add_handler(CommandHandler("start", cmd_start))
+    tg_app.add_handler(CommandHandler("ping",  cmd_ping))
+    tg_app.add_handler(CommandHandler("myid",  cmd_myid))
+    tg_app.add_handler(CommandHandler("list",  cmd_list))
+    tg_app.add_handler(MessageHandler(
+        filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.ANIMATION,
+        on_media
+    ))
+
+    # Web server
+    web_app = web.Application()
+    web_app["bot"] = tg_app.bot
+    web_app.router.add_get    ("/",                    handle_index)
+    web_app.router.add_get    ("/health",              handle_health)
+    web_app.router.add_get    ("/stream/{message_id}", handle_stream)
+    web_app.router.add_options("/stream/{message_id}", handle_options)
+
+    runner = web.AppRunner(web_app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
     log.info(f"✅ Web server ready on port {PORT}")
 
-    try:
-        await bot.start()
-        me = await bot.get_me()
-        log.info(f"✅ Bot: @{me.username} (ID: {me.id})")
-        log.info(f"👤 Owner: {OWNER_ID}")
-        log.info("🚀 LIVE! Send /start to your bot.")
-        log.info("="*48)
-    except Exception as e:
-        log.error(f"❌ Bot start failed: {e}")
-        await asyncio.Event().wait()
-        return
+    # Start bot polling
+    await tg_app.initialize()
+    await tg_app.start()
+    await tg_app.updater.start_polling(drop_pending_updates=True)
 
-    # ── KEY FIX: manual wait instead of idle() ──
+    me = await tg_app.bot.get_me()
+    log.info(f"✅ Bot: @{me.username} (ID: {me.id})")
+    log.info(f"👤 Owner: {OWNER_ID}")
+    log.info("🚀 LIVE! Send /start to your bot.")
+    log.info("="*48)
+
+    # Keep running
     try:
         await asyncio.Event().wait()
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
-        await bot.stop()
+        await tg_app.updater.stop()
+        await tg_app.stop()
+        await tg_app.shutdown()
         await runner.cleanup()
 
 if __name__ == "__main__":
