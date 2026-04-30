@@ -101,11 +101,10 @@ async def cmd_list(_, msg: Message):
 
 # ══ MAIN FEATURE ══════════════════════════════════
 
-@bot.on_message(
-    filters.private &
-    (filters.video | filters.document | filters.audio | filters.animation)
-)
+@bot.on_message(filters.private)
 async def on_media(_, msg: Message):
+    if not (msg.video or msg.document or msg.audio or msg.animation):
+        return
     if not is_owner(msg):
         await msg.reply_text(f"🔒 শুধু owner ব্যবহার করতে পারবে।\nআপনার ID: `{msg.from_user.id}`")
         return
@@ -269,4 +268,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
