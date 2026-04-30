@@ -1,4 +1,5 @@
-import os, asyncio, logging, sys, time
+import os, asyncio, logging, sys, time, json
+from pathlib import Path
 from aiohttp import web
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -26,13 +27,29 @@ ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "vagego2024")
 missing = [k for k,v in {"API_ID":API_ID,"API_HASH":API_HASH,"BOT_TOKEN":BOT_TOKEN}.items() if not v]
 if missing:
     log.error(f"MISSING ENV VARS: {', '.join(missing)}")
-    log.error("Go to: Render Dashboard → Your Service → Environment → Add Variables")
     sys.exit(1)
 
 log.info(f"Config OK | PORT={PORT} | OWNER_ID={OWNER_ID} | BASE_URL={BASE_URL or 'NOT SET'}")
 
-# ── File Store ─────────────────────────────────────────────────
-FILE_STORE = {}
+# ── Persistent File Store (JSON) ───────────────────────────────
+STORE_PATH = Path("/tmp/file_store.json")
+
+def load_store():
+    try:
+        if STORE_PATH.exists():
+            return json.loads(STORE_PATH.read_text())
+    except Exception as e:
+        log.warning(f"Store load error: {e}")
+    return {}
+
+def save_store(store):
+    try:
+        STORE_PATH.write_text(json.dumps(store, ensure_ascii=False))
+    except Exception as e:
+        log.warning(f"Store save error: {e}")
+
+FILE_STORE = load_store()
+log.info(f"Loaded {len(FILE_STORE)} cached files from store")
 
 # ── Bot Client ─────────────────────────────────────────────────
 bot = Client(
@@ -40,7 +57,7 @@ bot = Client(
     api_id=int(API_ID),
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    in_memory=True,   # No session file needed — works on Render free tier
+    in_memory=True,
 )
 
 # ── Helpers ────────────────────────────────────────────────────
@@ -68,12 +85,14 @@ async def cmd_start(_, msg: Message):
     await msg.reply_text(
         f"👋 **Hello {name}!**\n\n"
         "🎬 **VageGo Stream Bot**\n\n"
-        "আপনার চ্যানেল থেকে ভিডিও **forward** করুন।\n"
-        "আমি একটি **permanent stream link** দেব।\n"
-        "সেই link VageGo Admin Panel-এ paste করুন!\n\n"
+        "✅ এখন **যেকোনো video** এখানে পাঠান\n"
+        "🔗 আমি সাথে সাথে **Stream Link** দেব!\\n\n"
         f"🌐 Server: `{BASE_URL or 'BASE_URL set করুন'}`\n"
         f"📁 Cached: `{len(FILE_STORE)}` files\n\n"
-        "✅ Bot is Online!",
+        "📌 **কীভাবে ব্যবহার করবেন:**\n"
+        "১. যেকোনো video/movie এখানে পাঠান\n"
+        "২. Stream link পাবেন\n"
+        "৩. VageGo App এ paste করুন",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🎬 VageGo App", url="https://vagego.netlify.app")
         ]])
@@ -87,7 +106,6 @@ async def cmd_ping(_, msg: Message):
     await m.edit_text(
         f"🏓 **Pong!** `{ms}ms`\n"
         f"✅ Bot: Online\n"
-        f"✅ Server: Running\n"
         f"📁 Cached files: `{len(FILE_STORE)}`"
     )
 
@@ -98,16 +116,26 @@ async def cmd_myid(_, msg: Message):
         "এটি Render-এ `OWNER_ID` হিসেবে set করুন।"
     )
 
-@bot.on_message(filters.command("stats") & filters.private)
-async def cmd_stats(_, msg: Message):
-    await msg.reply_text(
-        f"📊 **Bot Stats**\n\n"
-        f"📁 Cached files: `{len(FILE_STORE)}`\n"
-        f"🌐 BASE_URL: `{BASE_URL or 'Not set'}`\n"
-        f"🔌 Port: `{PORT}`\n"
-        f"👤 Owner ID: `{OWNER_ID}`\n"
-        f"✅ Status: Online"
-    )
+@bot.on_message(filters.command("list") & filters.private)
+async def cmd_list(_, msg: Message):
+    if not is_owner(msg):
+        return
+    if not FILE_STORE:
+        await msg.reply_text("📭 কোনো cached file নেই।")
+        return
+    lines = [f"📁 **Cached Files ({len(FILE_STORE)}):**\n"]
+    for i, (k, v) in enumerate(list(FILE_STORE.items())[-10:], 1):
+        lines.append(f"{i}. `{v['file_name']}` — {fmt_size(v['file_size'])}\n`{make_url(k)}`")
+    await msg.reply_text("\n".join(lines))
+
+@bot.on_message(filters.command("clear") & filters.private)
+async def cmd_clear(_, msg: Message):
+    if not is_owner(msg):
+        return
+    count = len(FILE_STORE)
+    FILE_STORE.clear()
+    save_store(FILE_STORE)
+    await msg.reply_text(f"🗑️ {count}টি cached file মুছে দেওয়া হয়েছে।")
 
 # ══════════════════════════════════════════════════════════════
 # MAIN FEATURE — Video → Stream Link
@@ -118,7 +146,6 @@ async def cmd_stats(_, msg: Message):
     (filters.video | filters.document | filters.audio | filters.animation)
 )
 async def on_media(_, msg: Message):
-    # Only owner can use
     if not is_owner(msg):
         await msg.reply_text(
             f"🔒 এই bot শুধু owner ব্যবহার করতে পারবে।\n"
@@ -138,6 +165,7 @@ async def on_media(_, msg: Message):
         if not mime_type.startswith(("video/", "audio/")):
             mime_type = "video/mp4"
 
+        # Use message id as key
         key = str(msg.id)
         FILE_STORE[key] = {
             "file_id"  : file_id,
@@ -145,6 +173,7 @@ async def on_media(_, msg: Message):
             "mime_type": mime_type,
             "file_size": file_size,
         }
+        save_store(FILE_STORE)  # ← Persist immediately
 
         url = make_url(key)
 
@@ -182,42 +211,36 @@ async def handle_index(req):
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>VageGo Stream Server</title>
   <style>
     *{{margin:0;padding:0;box-sizing:border-box}}
     body{{font-family:'Segoe UI',sans-serif;background:#060d14;color:#e8f4fd;
-         display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}}
+         display:flex;align-items:center;justify-content:center;min-height:100vh}}
     .card{{background:#0f1c2a;border:1px solid #1e3a52;border-radius:20px;
-           padding:44px;text-align:center;max-width:460px;width:100%;
-           box-shadow:0 20px 60px rgba(0,0,0,.5)}}
+           padding:44px;text-align:center;max-width:460px;width:100%}}
     h1{{font-size:40px;font-weight:900;letter-spacing:5px;margin-bottom:6px;
         background:linear-gradient(135deg,#1a6fad,#e87b1e);
         -webkit-background-clip:text;-webkit-text-fill-color:transparent}}
-    .tag{{color:#7a9bb5;font-size:12px;letter-spacing:2px;margin-bottom:22px}}
     .badge{{display:inline-flex;align-items:center;gap:8px;
             background:rgba(46,204,113,.1);color:#2ecc71;
             border:1px solid rgba(46,204,113,.3);border-radius:30px;
-            padding:9px 22px;font-weight:700;font-size:13px;margin-bottom:22px}}
+            padding:9px 22px;font-weight:700;font-size:13px;margin:16px 0}}
     .dot{{width:9px;height:9px;background:#2ecc71;border-radius:50%;animation:p 1.4s infinite}}
     @keyframes p{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
     .info{{background:rgba(10,21,32,.7);border:1px solid #1e3a52;border-radius:12px;
-           padding:18px 22px;text-align:left;margin-top:4px}}
-    p{{color:#7a9bb5;font-size:13px;line-height:1.9;margin-bottom:6px}}
-    p:last-child{{margin-bottom:0}}
-    code{{background:#1e3a52;color:#f5a142;border-radius:4px;padding:2px 8px;
-          font-family:monospace;font-size:12px}}
+           padding:18px;text-align:left;margin-top:4px}}
+    p{{color:#7a9bb5;font-size:13px;line-height:2;margin-bottom:4px}}
+    code{{background:#1e3a52;color:#f5a142;border-radius:4px;padding:2px 8px;font-size:12px}}
   </style>
 </head>
 <body>
   <div class="card">
     <h1>VAGEGO</h1>
-    <div class="tag">TELEGRAM FILE STREAMING SERVER</div>
     <div class="badge"><div class="dot"></div> Server Online</div>
     <div class="info">
       <p>📁 Cached files: <code>{len(FILE_STORE)}</code></p>
-      <p>🔗 Stream URL: <code>{BASE_URL}/stream/{{msg_id}}</code></p>
-      <p>🤖 Bot: Send video → Get URL → Paste in Admin Panel</p>
+      <p>🔗 Stream: <code>{BASE_URL}/stream/{{id}}</code></p>
+      <p>🤖 Video পাঠান → Link পান → App এ paste করুন</p>
     </div>
   </div>
 </body>
@@ -226,20 +249,20 @@ async def handle_index(req):
 
 
 async def handle_health(req):
-    return web.json_response({
-        "status" : "ok",
-        "port"   : PORT,
-        "base_url": BASE_URL,
-        "cached" : len(FILE_STORE),
-    })
+    return web.json_response({"status":"ok","cached":len(FILE_STORE)})
 
 
 async def handle_stream(req):
-    key = req.match_info.get("message_id", "")
+    key = req.match_info.get("message_id","")
+
+    # Reload store in case of restart
+    if key not in FILE_STORE:
+        fresh = load_store()
+        FILE_STORE.update(fresh)
 
     if key not in FILE_STORE:
         return web.Response(
-            text=f"File '{key}' not found.\nBot restart হলে এটা হয়। Video আবার forward করুন।",
+            text=f"❌ File '{key}' not found.\nBot restart হলে video আবার পাঠান।",
             status=404, content_type="text/plain"
         )
 
@@ -249,18 +272,18 @@ async def handle_stream(req):
     mime_type = info["mime_type"]
     file_size = info["file_size"]
 
-    rh = req.headers.get("Range", "")
-    start, end = 0, max(file_size - 1, 0)
+    rh = req.headers.get("Range","")
+    start, end = 0, max(file_size-1,0)
 
     if rh and "=" in rh:
         try:
-            p = rh.split("=", 1)[1].split("-", 1)
+            p = rh.split("=",1)[1].split("-",1)
             start = int(p[0].strip()) if p[0].strip() else 0
-            end   = int(p[1].strip()) if len(p) > 1 and p[1].strip() else max(file_size-1, 0)
+            end   = int(p[1].strip()) if len(p)>1 and p[1].strip() else max(file_size-1,0)
         except Exception:
             pass
 
-    cl = max(end - start + 1, 0)
+    cl = max(end-start+1,0)
 
     headers = {
         "Content-Type"               : mime_type,
@@ -282,7 +305,7 @@ async def handle_stream(req):
 
     try:
         sent = 0
-        async for chunk in bot.stream_media(file_id, offset=start, limit=cl if cl > 0 else None):
+        async for chunk in bot.stream_media(file_id, offset=start, limit=cl if cl>0 else None):
             if not chunk: continue
             try:
                 await resp.write(chunk)
@@ -309,54 +332,37 @@ async def handle_options(req):
     })
 
 
-async def handle_cache(req):
-    if req.query.get("secret", "") != ADMIN_SECRET:
-        return web.Response(text="Unauthorized", status=401)
-    return web.json_response({
-        "count": len(FILE_STORE),
-        "files": [
-            {"id": k, "name": v["file_name"],
-             "size": fmt_size(v["file_size"]), "url": make_url(k)}
-            for k, v in FILE_STORE.items()
-        ]
-    })
-
-
 # ══════════════════════════════════════════════════════════════
 # STARTUP
 # ══════════════════════════════════════════════════════════════
 
 async def main():
-    log.info("=" * 48)
+    log.info("="*48)
     log.info("  VageGo Telegram Stream Bot")
-    log.info("=" * 48)
+    log.info("="*48)
 
-    # 1. Start web server first (Render health check needs this)
     app = web.Application()
     app.router.add_get    ("/",                    handle_index)
     app.router.add_get    ("/health",              handle_health)
     app.router.add_get    ("/stream/{message_id}", handle_stream)
     app.router.add_options("/stream/{message_id}", handle_options)
-    app.router.add_get    ("/cache",               handle_cache)
 
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
     log.info(f"✅ Web server: http://0.0.0.0:{PORT}")
-    log.info(f"🌐 Public URL: {BASE_URL or '⚠️  BASE_URL not set!'}")
+    log.info(f"🌐 Public URL: {BASE_URL or '⚠️ BASE_URL not set!'}")
 
-    # 2. Start Telegram bot
     try:
         await bot.start()
         me = await bot.get_me()
         log.info(f"✅ Bot started: @{me.username} (ID: {me.id})")
         log.info(f"👤 Owner ID  : {OWNER_ID}")
-        log.info("=" * 48)
+        log.info("="*48)
         log.info("🚀 LIVE! Send /start to your bot on Telegram.")
-        log.info("=" * 48)
+        log.info("="*48)
     except Exception as e:
         log.error(f"❌ Bot failed to start: {e}")
-        log.error("➡  Check API_ID, API_HASH, BOT_TOKEN in Render Environment")
         await asyncio.Event().wait()
         return
 
