@@ -54,7 +54,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 **Hello {name}!**\n\n"
         "🎬 **VageGo Stream Bot**\n\n"
-        "✅ যেকোনো **video forward** করুন\n"
+        "✅ যেকোনো **video** বা **image forward** করুন\n"
         "🔗 সাথে সাথে **Stream Link** পাবেন!\n\n"
         f"📁 Cached: `{len(FILE_STORE)}` files",
         parse_mode="Markdown",
@@ -101,17 +101,23 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         msg = update.message
         media = msg.video or msg.document or msg.audio or msg.animation
 
+        # ✅ Photo হ্যান্ডেল
+        if not media and msg.photo:
+            media = msg.photo[-1]  # সবচেয়ে বড় resolution
+            file_name = f"photo_{msg.message_id}.jpg"
+            mime_type = "image/jpeg"
+        else:
+            file_name = getattr(media, "file_name", None) or f"video_{msg.message_id}.mp4"
+            mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
+            if not mime_type.startswith(("video/", "audio/", "image/")):
+                mime_type = "video/mp4"
+
         if not media:
             await proc.edit_text("❌ কোনো media পাওয়া যায়নি।")
             return
 
         file_id   = media.file_id
-        file_name = getattr(media, "file_name", None) or f"video_{msg.message_id}.mp4"
         file_size = getattr(media, "file_size", 0) or 0
-        mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
-
-        if not mime_type.startswith(("video/", "audio/")):
-            mime_type = "video/mp4"
 
         key = str(msg.message_id)
         FILE_STORE[key] = {
@@ -153,7 +159,7 @@ p{{color:#7a9bb5;font-size:13px}}code{{background:#1e3a52;color:#f5a142;border-r
 <body><div class="c"><h1>VAGEGO</h1>
 <div class="b"><div class="dot"></div> Server Online</div>
 <p>📁 Cached: <code>{len(FILE_STORE)}</code> files</p>
-<p>🤖 Video পাঠান → Link পান → App এ paste করুন</p></div></body></html>""",
+<p>🤖 Video/Image পাঠান → Link পান → App এ paste করুন</p></div></body></html>""",
     content_type="text/html")
 
 async def handle_health(req):
@@ -231,7 +237,7 @@ async def main():
     tg_app.add_handler(CommandHandler("myid",  cmd_myid))
     tg_app.add_handler(CommandHandler("list",  cmd_list))
     tg_app.add_handler(MessageHandler(
-        filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.ANIMATION,
+        filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.ANIMATION | filters.PHOTO,
         on_media
     ))
 
