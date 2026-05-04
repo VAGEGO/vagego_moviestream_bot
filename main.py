@@ -1,18 +1,3 @@
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'VageGo Bot is alive!')
-    def log_message(self, *args):
-        pass
-
-threading.Thread(
-    target=lambda: HTTPServer(('0.0.0.0', 8080), Handler).serve_forever(),
-    daemon=True
-).start()
 import os, asyncio, logging, sys, time, json
 from pathlib import Path
 from aiohttp import web
@@ -64,8 +49,6 @@ def is_owner(user_id):
     if not OWNER_ID: return True
     return user_id == OWNER_ID
 
-# ══ COMMANDS ══════════════════════════════════════
-
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or "User"
     await update.message.reply_text(
@@ -100,8 +83,6 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for i, (k, v) in enumerate(list(FILE_STORE.items())[-10:], 1):
         lines.append(f"{i}. `{v['file_name']}`\n`{make_url(k)}`")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-# ══ MAIN FEATURE ══════════════════════════════════
 
 async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -160,8 +141,6 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         log.error(f"on_media error: {e}", exc_info=True)
         await proc.edit_text(f"❌ Error: `{str(e)[:300]}`", parse_mode="Markdown")
 
-# ══ WEB SERVER ════════════════════════════════════
-
 async def handle_index(req):
     return web.Response(text=f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
 <title>VageGo Stream</title>
@@ -193,7 +172,6 @@ async def handle_stream(req):
     mime_type = info["mime_type"]
     file_size = info["file_size"]
 
-    # Download from Telegram and stream
     bot = req.app["bot"]
     try:
         tg_file = await bot.get_file(file_id)
@@ -237,14 +215,11 @@ async def handle_options(req):
         "Access-Control-Allow-Headers":"Range, Content-Type",
     })
 
-# ══ STARTUP ═══════════════════════════════════════
-
 async def main():
     log.info("="*48)
     log.info("  VageGo Telegram Stream Bot v3")
     log.info("="*48)
 
-    # Build telegram app
     tg_app = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -260,7 +235,6 @@ async def main():
         on_media
     ))
 
-    # Web server
     web_app = web.Application()
     web_app["bot"] = tg_app.bot
     web_app.router.add_get    ("/",                    handle_index)
@@ -273,7 +247,6 @@ async def main():
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
     log.info(f"✅ Web server ready on port {PORT}")
 
-    # Start bot polling
     await tg_app.initialize()
     await tg_app.start()
     await tg_app.updater.start_polling(drop_pending_updates=True)
@@ -284,7 +257,6 @@ async def main():
     log.info("🚀 LIVE! Send /start to your bot.")
     log.info("="*48)
 
-    # Keep running
     try:
         await asyncio.Event().wait()
     except (KeyboardInterrupt, asyncio.CancelledError):
